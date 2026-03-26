@@ -17,12 +17,6 @@ app.use('/api/users', userRoutes);
 app.get('/', (req, res) => {
   res.send('Movie-Management-App-Backend is running successfully!');
 });
-app.use((req, res, next) => {
-  res.status(404).json({
-    status: 404,
-    message: "Sorry, the requested resource was not found on this server.",
-  });
-});
 
 connectDB();
 
