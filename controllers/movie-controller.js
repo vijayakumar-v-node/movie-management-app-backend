@@ -1,11 +1,37 @@
 const Movie = require('../models/movie-model');
-const fs = require('fs');
+const cloudinary = require('../config/cloudinary');
+
+const extractCloudinaryPublicId = (fileUrl) => {
+  if (!fileUrl || !fileUrl.includes('res.cloudinary.com')) return null;
+
+  try {
+    const pathnameParts = new URL(fileUrl).pathname.split('/').filter(Boolean);
+    const uploadIndex = pathnameParts.indexOf('upload');
+    if (uploadIndex === -1) return null;
+
+    const maybeVersion = pathnameParts[uploadIndex + 1] || '';
+    const startIndex = maybeVersion.startsWith('v') ? uploadIndex + 2 : uploadIndex + 1;
+    const publicIdWithExtension = pathnameParts.slice(startIndex).join('/');
+    return publicIdWithExtension.replace(/\.[^/.]+$/, '');
+  } catch (error) {
+    return null;
+  }
+};
+
+const deleteCloudinaryAsset = async (fileUrl) => {
+  const publicId = extractCloudinaryPublicId(fileUrl);
+  if (!publicId) return;
+
+  const resourceType = fileUrl.includes('/video/upload/') ? 'video' : 'image';
+  await cloudinary.uploader.destroy(publicId, { resource_type: resourceType });
+};
 
 exports.createMovie = async (req, res) => {
   try {
     const { body, files } = req;
-    if (!body.title || !body.description || !body.cast || !body.crew || !body.releaseDate) {
-      return res.status(400).json({ message: 'All fields are required' });
+
+    if (!body.title || !body.description || !body.releaseDate) {
+      return res.status(400).json({ message: 'Title, description and release date is required.' });
     }
     let findMovie = await Movie.findOne({ title: body.title, releaseDate: body.releaseDate });
     if (findMovie) {
@@ -36,8 +62,7 @@ exports.listMovies = async (req, res) => {
       limit = 10,
       search,
       minRating,
-      startDate,
-      endDate,
+      releaseDate,
       sortBy = 'createdAt',
       order = 'desc'
     } = req.query;
@@ -55,10 +80,9 @@ exports.listMovies = async (req, res) => {
     }
 
     // Filter by release date range
-    if (startDate || endDate) {
+    if (releaseDate) {
       query.releaseDate = {};
-      if (startDate) query.releaseDate.$gte = new Date(startDate);
-      if (endDate) query.releaseDate.$lte = new Date(endDate);
+      if (releaseDate) query.releaseDate = releaseDate;
     }
 
     // Sorting
@@ -74,16 +98,12 @@ exports.listMovies = async (req, res) => {
       .limit(Number(limit))
       .sort(sortQuery);
 
-    // Full URL
-    const baseUrl = `${req.protocol}://${req.get('host')}`;
-
     const updatedMovies = movies.map(movie => {
       const m = movie.toObject();
 
       return {
         ...m,
-        thumbnailUrl: m.thumbnailUrl ? `${baseUrl}/${m.thumbnailUrl}` : null,
-        videoUrl: m.videoUrl ? `${baseUrl}/${m.videoUrl}` : null
+        thumbnailUrl: m.thumbnailUrl || null
       };
     });
 
@@ -108,11 +128,10 @@ exports.getMovie = async (req, res) => {
     if (!movie) {
       return res.status(404).json({ message: 'Movie not found' });
     }
-    const baseUrl = `${req.protocol}://${req.get('host')}`;
     const updatedMovie = {
       ...movie.toObject(),
-      thumbnailUrl: movie.thumbnailUrl ? `${baseUrl}/${movie.thumbnailUrl}` : null,
-      videoUrl: movie.videoUrl ? `${baseUrl}/${movie.videoUrl}` : null
+      thumbnailUrl: movie.thumbnailUrl || null,
+      videoUrl: movie.videoUrl || null
     };
     res.status(200).json(updatedMovie);
   } catch (error) {
@@ -130,17 +149,39 @@ exports.updateMovie = async (req, res) => {
     let findMovie = await Movie.findOne({ _id: { $ne: req.params.id }, title: req.body.title, releaseDate: req.body.releaseDate });
     if (findMovie) {
       return res.status(400).json({ message: `The movie ${body.title} exists already.` });
-    } 
+    }
+    const existingMovie = await Movie.findById(req.params.id);
+    if (!existingMovie) {
+      return res.status(404).json({ message: 'Movie not found' });
+    }
+
     let updateFields = {
       ...(req.body),
       cast: JSON.parse(body.cast || '[]'),
-      crew: JSON.parse(body.crew || '[]'),
-      thumbnailUrl: files?.thumbnail?.[0]?.path,
-      videoUrl: files?.video?.[0]?.path
+      crew: JSON.parse(body.crew || '[]')
+    };
+
+    if (files?.thumbnail?.[0]?.path) {
+      updateFields.thumbnailUrl = files.thumbnail[0].path;
+      if (existingMovie.thumbnailUrl) {
+        await deleteCloudinaryAsset(existingMovie.thumbnailUrl);
+      }
     }
+
+    if (files?.video?.[0]?.path) {
+      updateFields.videoUrl = files.video[0].path;
+      if (existingMovie.videoUrl) {
+        await deleteCloudinaryAsset(existingMovie.videoUrl);
+      }
+    }
+
     // update movie
-    await Movie.findByIdAndUpdate(req.params.id, updateFields);
-    res.status(200).json({ message: 'Movie updated successfully' });
+    const updatedMovie = await Movie.findByIdAndUpdate(req.params.id, updateFields, {
+      new: true
+    });
+    res.status(200).json({
+      message: 'Movie updated successfully'
+    });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -153,12 +194,12 @@ exports.deleteMovie = async (req, res) => {
     if (!findMovie) {
       return res.status(404).json({ message: 'Movie not found' });
     }
-    // delete movie files from storage
+    // delete movie files from cloudinary
     if (findMovie.thumbnailUrl) {
-      fs.unlinkSync(`${findMovie.thumbnailUrl}`);
+      await deleteCloudinaryAsset(findMovie.thumbnailUrl);
     }
     if (findMovie.videoUrl) {
-      fs.unlinkSync(`${findMovie.videoUrl}`);
+      await deleteCloudinaryAsset(findMovie.videoUrl);
     }
     // delete movie
     await Movie.findByIdAndDelete(req.params.id);
